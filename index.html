@@ -75,7 +75,7 @@ label{text-align:left;font-size:13px;color:var(--mute);margin-bottom:-4px}
 </div>
 
 <!-- PeerJS: free peer-to-peer (WebRTC) with a free public signalling server. No account, no backend. -->
-<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js" onerror="this.onerror=null;this.src='https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js'"></script>
 <script>
 const $ = id => document.getElementById(id);
 const PREFIX = 'letstalk-v1-';
@@ -152,7 +152,16 @@ function start() {
   teardown();
   setStatus('Connecting…', false);
   const hostId = PREFIX + room;
-  const p = peer = new Peer(hostId);
+  if (typeof Peer !== 'function') {
+    setStatus('Chat library failed to load. Check your internet and reload.', false);
+    return;
+  }
+  let p;
+  try { p = peer = new Peer(hostId); }
+  catch (e) {
+    setStatus('Could not start chat: ' + (e && e.message ? e.message : String(e)), false);
+    return;
+  }
   p.on('open', () => {
     if (my !== session) return;
     isHost = true; setOnline(conns.size + 1); setStatus('', true); listen(p, my);
