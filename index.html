@@ -27,6 +27,9 @@ h1{font-size:17px;margin:0}
 .me .bub{background:var(--me);color:var(--meink);border-bottom-right-radius:5px}
 .them .bub{background:var(--them);border-bottom-left-radius:5px}
 form{display:flex;gap:8px;padding:10px 12px;border-top:1px solid var(--line);background:var(--card)}
+#attach{padding:0 13px;font-size:20px}
+#file{display:none}
+.bub img{display:block;max-width:min(260px,65vw);max-height:360px;border-radius:12px;object-fit:contain}
 input{flex:1;min-width:0;font:inherit;padding:11px 14px;border-radius:22px;border:1px solid var(--line);background:var(--bg);color:var(--ink);outline:none}
 input:focus{border-color:var(--me)}
 button{font:inherit;font-weight:600;border:0;border-radius:22px;padding:0 18px;background:var(--me);color:var(--meink);cursor:pointer}
@@ -64,6 +67,8 @@ label{text-align:left;font-size:13px;color:var(--mute);margin-bottom:-4px}
   </header>
   <div id="log"></div>
   <form id="form" autocomplete="off">
+    <input id="file" type="file" accept="image/*" hidden>
+    <button id="attach" class="ghost" type="button" title="Share image" aria-label="Share image" disabled>＋</button>
     <input id="msg" placeholder="Type a message…" maxlength="1000" disabled>
     <button id="send" disabled>Send</button>
   </form>
@@ -75,7 +80,7 @@ label{text-align:left;font-size:13px;color:var(--mute);margin-bottom:-4px}
 const $ = id => document.getElementById(id);
 const PREFIX = 'letstalk-v1-';
 const uid = Math.random().toString(36).slice(2, 8);
-const log = $('log'), msg = $('msg'), send = $('send'), dot = $('dot'), stxt = $('stxt');
+const log = $('log'), msg = $('msg'), send = $('send'), dot = $('dot'), stxt = $('stxt'), attach = $('attach'), file = $('file');
 let name = '', room = '', peer = null, conn = null, isHost = false, session = 0, counter = 0, online = 1, ready = false;
 const conns = new Map();          // host only: connection -> name
 const msgs = [], seen = new Set(); // everything this browser has seen
@@ -89,7 +94,7 @@ function setStatus(t, ok) {
   ready = ok;
   dot.className = ok ? 'on' : '';
   stxt.textContent = ok ? online + ' online' : t;
-  msg.disabled = send.disabled = !ok;
+  msg.disabled = send.disabled = attach.disabled = !ok;
 }
 function setOnline(n) { online = Math.max(1, n); if (ready) stxt.textContent = online + ' online'; }
 
@@ -99,18 +104,21 @@ function bubble(m) {
   const row = document.createElement('div');
   row.className = 'row ' + (mine ? 'me' : 'them');
   if (!mine) { const w = document.createElement('div'); w.className = 'who'; w.textContent = m.n; row.appendChild(w); }
-  const b = document.createElement('div'); b.className = 'bub'; b.textContent = m.x; row.appendChild(b);
+  const b = document.createElement('div'); b.className = 'bub';
+  if (m.type === 'image' && m.data) { const im = document.createElement('img'); im.src = m.data; im.alt = 'Shared image'; b.appendChild(im); }
+  else b.textContent = m.x;
+  row.appendChild(b);
   log.appendChild(row);
   if (near || mine) log.scrollTop = log.scrollHeight;
 }
 function renderAll() { log.textContent = ''; msgs.forEach(bubble); }
 
 /* ---------- messages ---------- */
-const okMsg = m => m && typeof m.id === 'string' && typeof m.n === 'string' && typeof m.x === 'string' && typeof m.ts === 'number';
-const norm = m => ({ id: m.id.slice(0, 40), n: clean(m.n, 24) || 'Guest', x: clean(m.x, 1000), ts: m.ts });
+const okMsg = m => m && typeof m.id === 'string' && typeof m.n === 'string' && typeof m.ts === 'number' && (typeof m.x === 'string' || (m.type === 'image' && typeof m.data === 'string' && m.data.startsWith('data:image/')));
+const norm = m => ({ id: m.id.slice(0, 40), n: clean(m.n, 24) || 'Guest', type: m.type === 'image' ? 'image' : 'text', data: m.type === 'image' ? m.data : undefined, x: clean(m.x, 1000), ts: m.ts });
 
 function ingest(m) {
-  if (!m.x || seen.has(m.id)) return;
+  if ((!m.x && m.type !== 'image') || seen.has(m.id)) return;
   seen.add(m.id); msgs.push(m);
   if (msgs.length > 300) seen.delete(msgs.shift().id);
   if (msgs.length > 1 && m.ts < msgs[msgs.length - 2].ts) { msgs.sort((a, b) => a.ts - b.ts); renderAll(); }
@@ -120,8 +128,13 @@ function bcast(d) { conns.forEach((n, c) => { if (c.open) c.send(d); }); }
 
 function sendMsg(text) {
   const id = uid + '-' + (++counter);
-  if (isHost) { const m = { id, n: name, x: text, ts: Date.now() }; ingest(m); bcast({ k: 'msg', m }); }
+  if (isHost) { const m = { id, n: name, type: 'text', x: text, ts: Date.now() }; ingest(m); bcast({ k: 'msg', m }); }
   else if (conn && conn.open) conn.send({ k: 'msg', id, x: text });
+}
+function sendImage(data) {
+  const id = uid + '-' + (++counter), m = { id, n: name, type: 'image', data, x: '', ts: Date.now() };
+  if (isHost) { ingest(m); bcast({ k: 'msg', m }); }
+  else if (conn && conn.open) conn.send({ k: 'image', id, data });
 }
 
 /* ---------- networking: first person in a room hosts it, others connect to the host ---------- */
@@ -159,12 +172,15 @@ function listen(p, my) {
     });
     c.on('data', d => {
       if (my !== session || !d) return;
-      if (d.k === 'hello') conns.set(c, clean(d.n, 24) || 'Guest');
+      if (d.k === 'hello') { conns.set(c, clean(d.n, 24) || 'Guest'); pushUsers(); }
       else if (d.k === 'msg') {
         const x = clean(d.x, 1000), id = String(d.id || '').slice(0, 40);
         if (!x || !id) return;
         const m = { id, n: conns.get(c) || 'Guest', x, ts: Date.now() };
         ingest(m); bcast({ k: 'msg', m });
+      } else if (d.k === 'image' && typeof d.data === 'string' && d.data.startsWith('data:image/') && d.data.length <= 700000) {
+        const m = { id: String(d.id || '').slice(0, 40), n: conns.get(c) || 'Guest', type: 'image', data: d.data, x: '', ts: Date.now() };
+        if (!m.id) return; ingest(m); bcast({ k: 'msg', m });
       }
     });
     c.on('close', () => { conns.delete(c); pushUsers(); });
@@ -193,7 +209,7 @@ function onClientData(d) {
   else if (d.k === 'hist' && Array.isArray(d.m)) {
     let changed = false;
     d.m.slice(-300).forEach(m => {
-      if (okMsg(m) && !seen.has(m.id)) { const n = norm(m); if (n.x) { seen.add(n.id); msgs.push(n); changed = true; } }
+      if (okMsg(m) && !seen.has(m.id)) { const n = norm(m); if (n.x || n.type === 'image') { seen.add(n.id); msgs.push(n); changed = true; } }
     });
     if (changed) { msgs.sort((a, b) => a.ts - b.ts); renderAll(); }
   }
@@ -219,6 +235,22 @@ $('form').addEventListener('submit', e => {
   if (!t || !ready) return;
   msg.value = ''; sendMsg(t); msg.focus();
 });
+async function shareImage(blob) {
+  if (!ready) { alert('Connect to the room before sharing an image.'); return; }
+  if (!blob || !blob.type.startsWith('image/')) return;
+  try {
+    const bitmap = await createImageBitmap(blob), scale = Math.min(1, 1280 / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement('canvas'); canvas.width = Math.round(bitmap.width * scale); canvas.height = Math.round(bitmap.height * scale);
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height); bitmap.close();
+    let data = canvas.toDataURL('image/jpeg', .72);
+    if (data.length > 650000) data = canvas.toDataURL('image/jpeg', .5);
+    if (data.length > 700000) { alert('Image is too large. Choose a smaller image.'); return; }
+    sendImage(data);
+  } catch (e) { alert('Could not process this image. Try another one.'); }
+}
+attach.addEventListener('click', () => file.click());
+file.addEventListener('change', () => { const f = file.files && file.files[0]; if (f) shareImage(f); file.value = ''; });
+msg.addEventListener('paste', e => { const item = Array.from(e.clipboardData.items || []).find(i => i.type.startsWith('image/')); if (item) { e.preventDefault(); shareImage(item.getAsFile()); } });
 $('copy').addEventListener('click', async () => {
   const b = $('copy');
   try { await navigator.clipboard.writeText(location.href); b.textContent = 'Copied ✓'; }
